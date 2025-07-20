@@ -85,16 +85,16 @@ void gpu_tilde_set_parameter(t_gpu_tilde *x, t_symbol *s, int argc, t_atom *argv
         return;
     }
     int index = atom_getint(argv);
-    if (index - 1 < 0) {
+    if (index < 0) {
         pd_error(x, "Parameter index must be >= 1");
         return;
     }
 
     float value = atom_getfloat(argv + 1);
-    if (x->parameters.size() < index) {
-        x->parameters.resize(index);
+    if (x->parameters.size() <= index) {
+        x->parameters.resize(index + 1);
     }
-    x->parameters[index - 1] = value;
+    x->parameters[index] = value;
 }
 
 // ─────────────────────────────────────
