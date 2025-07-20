@@ -95,7 +95,6 @@ void gpu_tilde_set_parameter(t_gpu_tilde *x, t_symbol *s, int argc, t_atom *argv
         x->parameters.resize(index);
     }
     x->parameters[index - 1] = value;
-    size_t paramCount = x->parameters.size();
 }
 
 // ─────────────────────────────────────
