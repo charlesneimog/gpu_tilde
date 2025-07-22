@@ -6,6 +6,7 @@
 #include <cassert>
 #include <vector>
 #include <cstring>
+#include <cmath>
 
 #include <m_pd.h>
 
@@ -19,6 +20,8 @@ typedef struct _gpu_tilde {
 
     t_symbol *shader_name;
     t_symbol *shader_path;
+    double phase;
+    double sample_rate;
 
     // parameters
     std::vector<float> parameters;
@@ -118,21 +121,19 @@ void gpu_tilde_reload(t_gpu_tilde *x) {
 // ─────────────────────────────────────
 t_int *gpu_tilde_perform(t_int *w) {
     t_gpu_tilde *x = (t_gpu_tilde *)w[1];
-    int n = (int)w[2];         // samples por canal (block size)
-    int chs = (int)w[3];       // número de canais
-    float *in = (float *)w[4]; // buffer único contínuo: canal0, canal1, canal2, ...
+    int n = (int)w[2];   // block size
+    int chs = (int)w[3]; // number of channels
+    float *in = (float *)w[4];
     float *out = (float *)w[5];
 
     int totalSamples = n * chs;
 
     if (!x->program) {
-        for (int i = 0; i < totalSamples; ++i) {
-            out[i] = 0;
-        }
+        memset(out, 0, totalSamples * sizeof(float));
         return (w + 6);
     }
 
-    GLuint ssboIn, ssboOut, ssboParams;
+    GLuint ssboIn, ssboOut, ssboAudio, ssboParams;
 
     // Input buffer (binding = 0)
     glGenBuffers(1, &ssboIn);
@@ -143,44 +144,61 @@ t_int *gpu_tilde_perform(t_int *w) {
     // Output buffer (binding = 1)
     glGenBuffers(1, &ssboOut);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboOut);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, totalSamples * sizeof(float), nullptr, GL_STATIC_READ);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, totalSamples * sizeof(float), NULL, GL_STATIC_READ);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssboOut);
 
-    // Parameters buffer (binding = 2)
+    // Audio data buffer (binding = 2): [globalPhase1Hz, sampleRate, blockSize, numChannels]
+    glGenBuffers(1, &ssboAudio);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboAudio);
+    float audioData[4];
+    audioData[0] = x->phase; // phase acumulada para 1 Hz [0, 2π)
+    audioData[1] = (float)x->sample_rate;
+    audioData[2] = (float)n;
+    audioData[3] = (float)chs;
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(audioData), audioData, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssboAudio);
+
+    // Parameters buffer (binding = 3)
     glGenBuffers(1, &ssboParams);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboParams);
-
     size_t paramCount = x->parameters.size();
     if (paramCount == 0) {
-        float dummy = 0.0f; // valor default
+        float dummy = 0.0f;
         glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), &dummy, GL_STATIC_DRAW);
     } else {
         glBufferData(GL_SHADER_STORAGE_BUFFER, paramCount * sizeof(float), x->parameters.data(),
                      GL_STATIC_DRAW);
     }
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssboParams);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, ssboParams);
 
-    // Executa o shader com dispatch igual ao total de samples (todos canais contínuos)
+    // Executa shader
     glUseProgram(x->program);
     glDispatchCompute(totalSamples, 1, 1);
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-    // Recupera resultado
+    // Recupera saída
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssboOut);
     float *result = (float *)glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY);
     if (result) {
         memcpy(out, result, totalSamples * sizeof(float));
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
     } else {
-        for (int i = 0; i < totalSamples; ++i) {
-            out[i] = 0;
-        }
+        memset(out, 0, totalSamples * sizeof(float));
     }
 
-    // Cleanup
+    // Limpa buffers
     glDeleteBuffers(1, &ssboIn);
     glDeleteBuffers(1, &ssboOut);
+    glDeleteBuffers(1, &ssboAudio);
     glDeleteBuffers(1, &ssboParams);
+
+    // Atualiza fase global 1 Hz, mantendo entre 0 e 2π
+    x->phase += n * (2.0f * M_PI / x->sample_rate);
+    if (x->phase >= 2.0f * M_PI) {
+        x->phase -= 2.0f * M_PI;
+    } else if (x->phase < 0.0f) {
+        x->phase += 2.0f * M_PI;
+    }
 
     return (w + 6);
 }
@@ -188,7 +206,9 @@ t_int *gpu_tilde_perform(t_int *w) {
 // ─────────────────────────────────────
 void gpu_tilde_dsp(t_gpu_tilde *x, t_signal **sp) {
     int inCh = sp[0]->s_nchans;
+    x->phase = 0;
     x->block_size = sp[0]->s_n;
+    x->sample_rate = sp[0]->s_sr;
     signal_setmultiout(&sp[1], inCh);
     dsp_add(gpu_tilde_perform, 5, x, sp[0]->s_n, sp[0]->s_nchans, sp[0]->s_vec, sp[1]->s_vec);
 }
